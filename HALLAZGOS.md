@@ -277,6 +277,36 @@ Método idéntico al backend: reproducir en el navegador → aislar causa → ca
    - Reporte con 20,000 pedidos sembrados: **6.97 s → 0.087 s** (~80×), incluyendo el día final del rango.
    - Panel: `/`, `/pedidos` y `/reportes` responden 200; `dangerouslySetInnerHTML` eliminado del código.
 
+## Segunda pasada — auditoría cruzada
+
+Tras cerrar los tickets hice una **segunda auditoría independiente** en cuatro frentes (lógica backend, frontend, pruebas exploratorias contra la API viva con ~45 casos hostiles, y consistencia de la entrega). Hallazgos reales encontrados y corregidos:
+
+### Corregidos — backend · commits `9991061` y `c189d8e`
+
+1. **[Alto] Líneas duplicadas del mismo producto burlaban la validación de stock.** La verificación previa al cobro validaba línea por línea contra el mismo stock completo: `[{producto 4, cant 2}, {producto 4, cant 1}]` con stock 2 pasaba, **se cobraba al cliente** y el pedido caía determinísticamente en la ruta "requiere reverso del pago". Ahora las cantidades se **agregan por producto** antes de validar → 400 sin cobrar. (Encontrado por dos agentes por separado y reproducido en vivo.)
+2. **[Medio] La `DbUpdateConcurrencyException` del tercer reintento escapaba** como 500 crudo con el cliente cobrado, sin compensación, sin log y sin pedido persistido (peor que el TICK-205 original, aunque requiere 3 colisiones consecutivas). Ahora se traduce a error de negocio: el flujo compensa, persiste el pedido `Pendiente` y registra; la compensación misma tampoco puede tumbar la petición.
+3. **[Medio] Producto con `Activo=false` seguía siendo comprable por Id** (el catálogo lo oculta, pero `POST /api/pedidos` no validaba). Ahora se rechaza.
+4. **[Medio] Descuento sin acotar por abajo:** un `PorcentajeDescuento` negativo en BD producía descuento negativo que **inflaba** el cobro. Se acota a 0 con advertencia en el log. (Por arriba ya acotaba el tope de $15: verificado en vivo con un cupón de 150% — total $0.57, nunca negativo.)
+5. **[Bajo] Cupones sensibles a mayúsculas/espacios** (`"bienvenida10"` → "no existe"): se normalizan con trim + comparación sin distinguir mayúsculas — los clientes dictan el código por teléfono.
+6. **[Bajo] Reportes:** `desde > hasta` ahora es 400 con detalle, y un `hasta` de solo fecha se interpreta como **día completo** (consultar "ventas de hoy" vía API directa devolvía vacío; el panel ya mandaba fin de día).
+7. **[Bajo] Índice único en `Cupon.Codigo`** (un código duplicado aplicaba un cupón no determinista), **tope de 100 líneas por pedido** (DoS ligero: una consulta + una escritura por línea) y **comprobante** solo para pedidos pagados, registrado en log y con moneda invariante (`{Total:C}` imprimía `¤` en el contenedor).
+
+### Corregidos — frontend · commit `2f18d20`
+
+8. **[Alto] El estimado del panel no replicaba el tope de $15** (Parte 4): Monitor $180 + 10% → panel estimaba $183.06, la API cobraba $186.45 — exactamente la divergencia que TICK-302 debía eliminar. `money.ts` ahora replica el tope y el estimado avisa cuando se aplica.
+9. **[Medio] Redondeo latente de medio centavo:** con floats, `15.50 × 47% = 7.28499999…` redondeaba a 7.28 mientras el backend (decimal, AwayFromZero) da 7.29. Inalcanzable con el cupón sembrado (10%) pero se activaba con cualquier % nuevo. El cálculo pasó a **centavos enteros**.
+10. **[Medio] Fechas del reporte interpretadas como día UTC:** un pedido de las 19:00 locales (UTC-6) cae "mañana" en UTC y no aparecía en el reporte de "hoy". El panel convierte ahora los días locales del agente a instantes UTC; además "Hasta" por defecto es hoy (quedaba fijo en una fecha pasada) y la tabla indica el rango consultado.
+11. **[Bajo]** Etiqueta "Resultados para X" mostraba el término tecleado, no el que produjo los resultados en vuelo; `Number("")===0` dejaba pasar un % vacío como 0 sin aviso; cantidades/cliente sin tope desbordaban el `int` de .NET con error genérico; `rel="noopener noreferrer"` faltante en el enlace externo del layout.
+
+### Documentados sin corregir (decisión declarada)
+
+- **Catálogo del formulario de pedidos** (`CATALOGO` en `crear-pedido-form.tsx`) hardcodeado con los precios del seed: si un precio cambia en BD, el estimado diverge en silencio (el card "Respuesta de la API" siempre muestra los montos reales cobrados). Fix propuesto: endpoint de catálogo o reutilizar el buscador para poblar el select; excede el cambio mínimo.
+- **La respuesta de `POST /api/pedidos` serializa la entidad** con navegaciones (expone `Cliente.Email` y el stock del producto) y devuelve 200 también para pedidos `Rechazado`. Fix propuesto: DTO de respuesta dedicado; lo dejo documentado para no romper el contrato que consume el panel dentro del alcance de la prueba.
+- **Swagger habilitado con `ASPNETCORE_ENVIRONMENT=Production`** y **credenciales fijas** de PostgreSQL en `docker-compose.yml`/`appsettings.json`: aceptable en el sandbox de la prueba (el README dirige a `/swagger`), inaceptable en producción real — Swagger condicionado a entorno y secretos por variables/secret store.
+- La ventana de ~1 ms del límite `T23:59:59.999` del panel (un pedido en el último milisegundo del día quedaría fuera) — mitigada además por el nuevo manejo de fecha-sin-hora del backend.
+
+*Verificación de esta pasada:* suite 8/8 en verde, `next build` limpio, y re-verificación E2E contra los contenedores reconstruidos (líneas duplicadas → 400 sin cobro; producto inactivo → 400; cupón en minúsculas → aplica; `desde=hasta=hoy` vía API → incluye el día; % 150 → tope $15). La bandeja de conciliación acumulada por el bug #1 durante las pruebas (pedidos `Pendiente` con "requiere reverso") quedó limpia al recrear la base.
+
 ## Herramientas y tiempo
 
 - Trabajé con mi IDE, Docker, `curl`/Swagger y **asistencia de IA (Claude Code)** para acelerar la exploración del código, la redacción de esta bitácora y la generación de casos de prueba; cada corrección fue reproducida antes de tocar código y verificada después con tests y la batería E2E de arriba (lo documenta la regla de la prueba sobre herramientas consultadas).
