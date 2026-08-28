@@ -60,7 +60,7 @@ public class FixesEsperadosTests
     // ====================================================================
     // TICK-203 — Un cupón inexistente no debe reventar con NullReference (500)
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-203: un código de cupón inexistente no debe lanzar NullReferenceException.")]
+    [Fact]
     public void TICK203_CuponInexistente_NoLanzaNullReference()
     {
         using var db = NuevaBdEnMemoria();

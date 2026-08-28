@@ -26,14 +26,35 @@ public class ProductosController : ControllerBase
 public class PedidosController : ControllerBase
 {
     private readonly PedidoService _pedidos;
-    public PedidosController(PedidoService pedidos) => _pedidos = pedidos;
+    private readonly ILogger<PedidosController> _logger;
+
+    public PedidosController(PedidoService pedidos, ILogger<PedidosController> logger)
+    {
+        _pedidos = pedidos;
+        _logger = logger;
+    }
 
     // POST /api/pedidos
     [HttpPost]
     public IActionResult Crear([FromBody] CrearPedidoDto dto)
     {
-        var pedido = _pedidos.CrearPedido(dto);
-        return Ok(pedido);
+        try
+        {
+            var pedido = _pedidos.CrearPedido(dto);
+            return Ok(pedido);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Error de negocio esperado (cliente/producto/cupón inválido, stock
+            // insuficiente): se responde 400 con el detalle en vez de un 500 crudo.
+            _logger.LogWarning("Pedido rechazado por regla de negocio: {Motivo}", ex.Message);
+            return BadRequest(new ProblemDetails
+            {
+                Title = "No se pudo crear el pedido.",
+                Detail = ex.Message,
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
     }
 }
 

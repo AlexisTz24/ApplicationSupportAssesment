@@ -58,10 +58,19 @@ public class PedidoService
         {
             var cupon = _db.Cupones.FirstOrDefault(c => c.Codigo == dto.CodigoCupon);
 
+            // Un código que no existe en la base (p. ej. una campaña publicada
+            // pero nunca registrada) es un error de negocio controlado, no un 500.
+            if (cupon == null)
+                throw new InvalidOperationException($"El cupón '{dto.CodigoCupon}' no existe.");
+
             // Validar vigencia del cupón
             if (cupon.FechaExpiracionUtc >= DateTime.Now && cupon.Activo)
             {
                 descuento = subtotal * (cupon.PorcentajeDescuento / 100m);
+            }
+            else
+            {
+                throw new InvalidOperationException($"El cupón '{dto.CodigoCupon}' no está vigente.");
             }
         }
 
@@ -107,6 +116,9 @@ public class PedidoService
     public string GenerarLineaComprobante(Pedido pedido)
     {
         var cliente = _db.Clientes.FirstOrDefault(c => c.Id == pedido.ClienteId);
-        return $"Comprobante para {cliente.Email.ToUpper()} - Total: {pedido.Total:C}";
+        var destinatario = string.IsNullOrWhiteSpace(cliente?.Email)
+            ? $"{cliente?.Nombre ?? "cliente " + pedido.ClienteId} (sin correo registrado)"
+            : cliente!.Email.ToUpperInvariant();
+        return $"Comprobante para {destinatario} - Total: {pedido.Total:C}";
     }
 }
