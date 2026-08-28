@@ -83,7 +83,7 @@ public class FixesEsperadosTests
     // ====================================================================
     // TICK-205 — Si el cobro falla, el pedido NO puede quedar "Pagado"
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-205: si la pasarela falla/cae, el pedido no debe marcarse como Pagado.")]
+    [Fact]
     public void TICK205_CobroQueFalla_NoDejaPedidoPagado()
     {
         using var db = NuevaBdEnMemoria();

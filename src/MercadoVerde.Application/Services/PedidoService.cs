@@ -2,6 +2,8 @@ using System.Linq;
 using MercadoVerde.Application.Abstractions;
 using MercadoVerde.Application.Dtos;
 using MercadoVerde.Domain;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MercadoVerde.Application.Services;
 
@@ -12,12 +14,15 @@ public class PedidoService
     private readonly ITiendaDbContext _db;
     private readonly InventarioService _inventario;
     private readonly IPasarelaPagoService _pasarela;
+    private readonly ILogger<PedidoService> _logger;
 
-    public PedidoService(ITiendaDbContext db, InventarioService inventario, IPasarelaPagoService pasarela)
+    public PedidoService(ITiendaDbContext db, InventarioService inventario, IPasarelaPagoService pasarela,
+        ILogger<PedidoService>? logger = null)
     {
         _db = db;
         _inventario = inventario;
         _pasarela = pasarela;
+        _logger = logger ?? NullLogger<PedidoService>.Instance;
     }
 
     public Pedido CrearPedido(CrearPedidoDto dto)
@@ -93,19 +98,38 @@ public class PedidoService
         {
             var resultado = _pasarela.Cobrar(total, $"Pedido cliente {cliente.Nombre}");
             if (resultado.Aprobado)
+            {
                 pedido.Estado = EstadoPedido.Pagado;
+                pedido.ReferenciaPago = resultado.Referencia;
+            }
             else
+            {
                 pedido.Estado = EstadoPedido.Rechazado;
+                pedido.MotivoRechazo = resultado.MotivoRechazo;
+                _logger.LogWarning(
+                    "Cobro rechazado por la pasarela (cliente {ClienteId}): {Motivo}",
+                    cliente.Id, resultado.MotivoRechazo);
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // El cobro falló por indisponibilidad del proveedor.
-            pedido.Estado = EstadoPedido.Pagado;
+            // El proveedor no respondió: el cobro NO está confirmado, así que el
+            // pedido no puede quedar Pagado. Queda Pendiente para reintento o
+            // conciliación, y la falla queda registrada (nunca invisible).
+            pedido.Estado = EstadoPedido.Pendiente;
+            pedido.MotivoRechazo = "La pasarela de pago no respondió; cobro no confirmado.";
+            _logger.LogError(ex,
+                "Fallo de la pasarela al cobrar pedido del cliente {ClienteId}; el pedido queda Pendiente para conciliación.",
+                cliente.Id);
         }
 
-        // 5) Descontar inventario
-        foreach (var linea in pedido.Lineas)
-            _inventario.DescontarStock(linea.ProductoId, linea.Cantidad);
+        // 5) Descontar inventario, solo si el cobro fue aprobado: un pedido
+        //    rechazado o pendiente no debe consumir stock.
+        if (pedido.Estado == EstadoPedido.Pagado)
+        {
+            foreach (var linea in pedido.Lineas)
+                _inventario.DescontarStock(linea.ProductoId, linea.Cantidad);
+        }
 
         // 6) Generar el comprobante de confirmación que se envía por correo al cliente.
         GenerarLineaComprobante(pedido);
