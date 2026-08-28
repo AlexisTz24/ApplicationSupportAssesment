@@ -21,30 +21,21 @@ public class ReporteService
     }
 
     // Genera el reporte de ventas de un rango de fechas.
-    // En producción la tabla Pedidos tiene cientos de miles de filas.
+    // En producción la tabla Pedidos tiene cientos de miles de filas, por lo que
+    // el reporte se resuelve en UNA sola consulta proyectada en la base de datos
+    // (nada de volver por las líneas y el cliente pedido por pedido: eso eran
+    // 2N+1 consultas y decenas de segundos).
     public List<FilaReporte> GenerarReporteVentas(DateTime desdeUtc, DateTime hastaUtc)
     {
-        var pedidos = _db.Pedidos
+        return _db.Pedidos
             .Where(p => p.FechaUtc >= desdeUtc && p.FechaUtc <= hastaUtc)
-            .ToList();
-
-        var filas = new List<FilaReporte>();
-        foreach (var pedido in pedidos)
-        {
-            // Por cada pedido se vuelve a la base de datos a traer sus líneas
-            // y el nombre del cliente.
-            var lineas = _db.LineasPedido.Where(l => l.PedidoId == pedido.Id).ToList();
-            var cliente = _db.Clientes.FirstOrDefault(c => c.Id == pedido.ClienteId);
-
-            filas.Add(new FilaReporte
+            .Select(p => new FilaReporte
             {
-                PedidoId = pedido.Id,
-                Cliente = cliente?.Nombre ?? "(desconocido)",
-                CantidadArticulos = lineas.Sum(l => l.Cantidad),
-                Total = pedido.Total
-            });
-        }
-
-        return filas;
+                PedidoId = p.Id,
+                Cliente = p.Cliente != null ? p.Cliente.Nombre : "(desconocido)",
+                CantidadArticulos = p.Lineas.Sum(l => (int?)l.Cantidad) ?? 0,
+                Total = p.Total
+            })
+            .ToList();
     }
 }
