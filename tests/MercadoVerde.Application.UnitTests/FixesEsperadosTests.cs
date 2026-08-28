@@ -105,7 +105,7 @@ public class FixesEsperadosTests
     // TICK-206 — El buscador no debe ser vulnerable a inyección SQL
     // (usa SQLite real en memoria porque el repo usa FromSqlRaw)
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-206: la búsqueda debe parametrizarse (sin inyección SQL).")]
+    [Fact]
     public void TICK206_Buscador_NoPermiteInyeccionNiRompeConComilla()
     {
         using var conn = new SqliteConnection("DataSource=:memory:");
