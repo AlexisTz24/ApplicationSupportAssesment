@@ -26,6 +26,11 @@ public class TiendaDbContext : DbContext, ITiendaDbContext
         // SQLite e InMemory, los tres proveedores con los que corre la solución.)
         modelBuilder.Entity<Producto>().Property(p => p.Stock).IsConcurrencyToken();
 
+        // Un código de cupón no puede existir dos veces: sin este índice, un
+        // re-registro de campaña duplicado haría que FirstOrDefault aplique un
+        // cupón no determinista.
+        modelBuilder.Entity<Cupon>().HasIndex(c => c.Codigo).IsUnique();
+
         base.OnModelCreating(modelBuilder);
     }
 }

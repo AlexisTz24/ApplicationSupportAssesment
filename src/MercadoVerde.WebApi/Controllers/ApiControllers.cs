@@ -69,6 +69,21 @@ public class ReportesController : ControllerBase
     [HttpGet("ventas")]
     public IActionResult Ventas([FromQuery] DateTime desde, [FromQuery] DateTime hasta)
     {
+        if (desde > hasta)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Rango de fechas inválido.",
+                Detail = "'desde' no puede ser posterior a 'hasta'.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        // Si 'hasta' llega como fecha sin hora (00:00), se interpreta como el
+        // día completo: pedir "hasta hoy" incluye los pedidos de hoy.
+        if (hasta.TimeOfDay == TimeSpan.Zero)
+            hasta = hasta.AddDays(1).AddTicks(-1);
+
         return Ok(_reportes.GenerarReporteVentas(desde, hasta));
     }
 }
