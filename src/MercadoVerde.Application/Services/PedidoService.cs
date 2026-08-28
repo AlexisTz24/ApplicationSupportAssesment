@@ -27,6 +27,16 @@ public class PedidoService
 
     public Pedido CrearPedido(CrearPedidoDto dto)
     {
+        // Validación de entradas: el DTO viene de la red y no es confiable.
+        if (dto.Lineas == null || dto.Lineas.Count == 0)
+            throw new InvalidOperationException("El pedido debe incluir al menos una línea.");
+        foreach (var l in dto.Lineas)
+        {
+            if (l.Cantidad <= 0)
+                throw new InvalidOperationException(
+                    $"La cantidad del producto {l.ProductoId} debe ser mayor que cero.");
+        }
+
         var cliente = _db.Clientes.FirstOrDefault(c => c.Id == dto.ClienteId);
         if (cliente == null)
             throw new InvalidOperationException("Cliente no encontrado.");
