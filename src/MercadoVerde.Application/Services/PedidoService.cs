@@ -11,6 +11,11 @@ public class PedidoService
 {
     private const decimal TasaImpuesto = 0.13m; // IVA 13%
 
+    // Regla de negocio: ningún cupón puede descontar más de este monto por
+    // pedido, sin importar el porcentaje. Si el cálculo lo supera, se aplica el
+    // tope y se deja constancia (log + nota en el pedido).
+    private const decimal TopeDescuentoCupon = 15.00m;
+
     private readonly ITiendaDbContext _db;
     private readonly InventarioService _inventario;
     private readonly IPasarelaPagoService _pasarela;
@@ -90,6 +95,18 @@ public class PedidoService
             {
                 descuento = Math.Round(subtotal * (cupon.PorcentajeDescuento / 100m),
                     2, MidpointRounding.AwayFromZero);
+
+                // Tope de descuento por pedido (solicitud de negocio).
+                if (descuento > TopeDescuentoCupon)
+                {
+                    pedido.NotaDescuento =
+                        $"Cupón {cupon.Codigo}: descuento calculado {descuento:0.00} " +
+                        $"superó el tope; se aplicó {TopeDescuentoCupon:0.00}.";
+                    _logger.LogInformation(
+                        "Cupón {Codigo}: descuento calculado {DescuentoCalculado} supera el tope {Tope}; se aplica el tope (cliente {ClienteId}).",
+                        cupon.Codigo, descuento, TopeDescuentoCupon, cliente.Id);
+                    descuento = TopeDescuentoCupon;
+                }
             }
             else
             {
