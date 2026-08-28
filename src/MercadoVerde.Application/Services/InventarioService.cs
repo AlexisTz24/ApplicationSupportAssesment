@@ -42,8 +42,16 @@ public class InventarioService
                 _db.SaveChanges();
                 return;
             }
-            catch (DbUpdateConcurrencyException ex) when (intento < MaxIntentos)
+            catch (DbUpdateConcurrencyException ex)
             {
+                // Al agotar los reintentos se traduce a un error de negocio:
+                // así el flujo de pedidos puede compensar y registrar la falla
+                // (una DbUpdateConcurrencyException cruda sería un 500 mudo).
+                if (intento >= MaxIntentos)
+                    throw new InvalidOperationException(
+                        $"No se pudo actualizar el stock del producto {producto.Nombre} por alta concurrencia; reintente.",
+                        ex);
+
                 // Otra petición ganó la carrera: recargar el estado real de la
                 // base y volver a validar/descontar.
                 foreach (var entry in ex.Entries)
@@ -68,8 +76,13 @@ public class InventarioService
                 _db.SaveChanges();
                 return;
             }
-            catch (DbUpdateConcurrencyException ex) when (intento < MaxIntentos)
+            catch (DbUpdateConcurrencyException ex)
             {
+                if (intento >= MaxIntentos)
+                    throw new InvalidOperationException(
+                        $"No se pudo reponer el stock del producto {productoId} por alta concurrencia.",
+                        ex);
+
                 foreach (var entry in ex.Entries)
                     entry.Reload();
             }

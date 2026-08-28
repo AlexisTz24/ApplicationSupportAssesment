@@ -16,6 +16,10 @@ public class PedidoService
     // tope y se deja constancia (log + nota en el pedido).
     private const decimal TopeDescuentoCupon = 15.00m;
 
+    // Límite defensivo: evita que un cliente hostil mande decenas de miles de
+    // líneas en un solo pedido (una consulta y una escritura por línea).
+    private const int MaxLineasPorPedido = 100;
+
     private readonly ITiendaDbContext _db;
     private readonly InventarioService _inventario;
     private readonly IPasarelaPagoService _pasarela;
@@ -35,6 +39,9 @@ public class PedidoService
         // Validación de entradas: el DTO viene de la red y no es confiable.
         if (dto.Lineas == null || dto.Lineas.Count == 0)
             throw new InvalidOperationException("El pedido debe incluir al menos una línea.");
+        if (dto.Lineas.Count > MaxLineasPorPedido)
+            throw new InvalidOperationException(
+                $"El pedido no puede tener más de {MaxLineasPorPedido} líneas.");
         foreach (var l in dto.Lineas)
         {
             if (l.Cantidad <= 0)
@@ -56,15 +63,27 @@ public class PedidoService
 
         // 1) Construir líneas y subtotal
         decimal subtotal = 0m;
+        var cantidadPorProducto = new Dictionary<int, int>();
         foreach (var l in dto.Lineas)
         {
             var producto = _db.Productos.FirstOrDefault(p => p.Id == l.ProductoId);
             if (producto == null)
                 throw new InvalidOperationException($"Producto {l.ProductoId} no existe.");
 
+            // Un producto retirado del catálogo no debe poder comprarse aunque
+            // se conozca su Id.
+            if (!producto.Activo)
+                throw new InvalidOperationException(
+                    $"El producto {producto.Nombre} no está disponible para la venta.");
+
             // Verificación temprana de stock: si no alcanza, se rechaza el pedido
-            // ANTES de cobrar (evita cobros por mercancía inexistente).
-            if (producto.Stock < l.Cantidad)
+            // ANTES de cobrar (evita cobros por mercancía inexistente). Se
+            // acumulan las cantidades por producto para que varias líneas del
+            // mismo producto no validen cada una contra el stock completo.
+            cantidadPorProducto.TryGetValue(producto.Id, out var yaSolicitado);
+            var solicitadoTotal = yaSolicitado + l.Cantidad;
+            cantidadPorProducto[producto.Id] = solicitadoTotal;
+            if (producto.Stock < solicitadoTotal)
                 throw new InvalidOperationException(
                     $"Stock insuficiente para el producto {producto.Nombre}.");
 
@@ -78,16 +97,18 @@ public class PedidoService
             subtotal += producto.Precio * l.Cantidad;
         }
 
-        // 2) Aplicar cupón (si viene)
+        // 2) Aplicar cupón (si viene). El código se normaliza (sin espacios y
+        //    sin distinguir mayúsculas): los clientes lo dictan por teléfono.
         decimal descuento = 0m;
         if (!string.IsNullOrWhiteSpace(dto.CodigoCupon))
         {
-            var cupon = _db.Cupones.FirstOrDefault(c => c.Codigo == dto.CodigoCupon);
+            var codigoCupon = dto.CodigoCupon.Trim();
+            var cupon = _db.Cupones.FirstOrDefault(c => c.Codigo.ToUpper() == codigoCupon.ToUpper());
 
             // Un código que no existe en la base (p. ej. una campaña publicada
             // pero nunca registrada) es un error de negocio controlado, no un 500.
             if (cupon == null)
-                throw new InvalidOperationException($"El cupón '{dto.CodigoCupon}' no existe.");
+                throw new InvalidOperationException($"El cupón '{codigoCupon}' no existe.");
 
             // Validar vigencia del cupón. La expiración se persiste en UTC, así
             // que se compara contra la hora UTC (no la hora local del servidor).
@@ -95,6 +116,16 @@ public class PedidoService
             {
                 descuento = Math.Round(subtotal * (cupon.PorcentajeDescuento / 100m),
                     2, MidpointRounding.AwayFromZero);
+
+                // Defensa ante datos corruptos: un porcentaje negativo en la BD
+                // produciría un descuento negativo que INFLARÍA el cobro.
+                if (descuento < 0m)
+                {
+                    _logger.LogWarning(
+                        "Cupón {Codigo} con porcentaje inválido ({Porcentaje}); se ignora el descuento.",
+                        cupon.Codigo, cupon.PorcentajeDescuento);
+                    descuento = 0m;
+                }
 
                 // Tope de descuento por pedido (solicitud de negocio).
                 if (descuento > TopeDescuentoCupon)
@@ -110,7 +141,7 @@ public class PedidoService
             }
             else
             {
-                throw new InvalidOperationException($"El cupón '{dto.CodigoCupon}' no está vigente.");
+                throw new InvalidOperationException($"El cupón '{codigoCupon}' no está vigente.");
             }
         }
 
@@ -175,8 +206,19 @@ public class PedidoService
                 // verificación inicial y el descuento, con el cobro ya hecho.
                 // Se repone lo descontado, el pedido queda Pendiente (no Pagado)
                 // y la situación queda registrada para reversar el cobro.
-                foreach (var linea in lineasDescontadas)
-                    _inventario.ReponerStock(linea.ProductoId, linea.Cantidad);
+                // La compensación en sí no puede tumbar la petición: si también
+                // falla, se registra y el pedido igual se persiste con motivo.
+                try
+                {
+                    foreach (var linea in lineasDescontadas)
+                        _inventario.ReponerStock(linea.ProductoId, linea.Cantidad);
+                }
+                catch (Exception repEx)
+                {
+                    _logger.LogCritical(repEx,
+                        "La compensación de stock del pedido del cliente {ClienteId} falló; revisar inventario manualmente.",
+                        cliente.Id);
+                }
 
                 pedido.Estado = EstadoPedido.Pendiente;
                 pedido.MotivoRechazo =
@@ -187,8 +229,11 @@ public class PedidoService
             }
         }
 
-        // 6) Generar el comprobante de confirmación que se envía por correo al cliente.
-        GenerarLineaComprobante(pedido);
+        // 6) Generar el comprobante de confirmación que se envía por correo al
+        //    cliente. Solo aplica a pedidos efectivamente pagados, y queda en el
+        //    log mientras no exista el envío real de correo.
+        if (pedido.Estado == EstadoPedido.Pagado)
+            _logger.LogInformation("Comprobante generado: {Comprobante}", GenerarLineaComprobante(pedido));
 
         // 7) Persistir el pedido
         _db.Pedidos.Add(pedido);
@@ -204,6 +249,8 @@ public class PedidoService
         var destinatario = string.IsNullOrWhiteSpace(cliente?.Email)
             ? $"{cliente?.Nombre ?? "cliente " + pedido.ClienteId} (sin correo registrado)"
             : cliente!.Email.ToUpperInvariant();
-        return $"Comprobante para {destinatario} - Total: {pedido.Total:C}";
+        // Formato de moneda explícito: {Total:C} depende de la cultura del
+        // contenedor (en la imagen invariante imprime '¤').
+        return $"Comprobante para {destinatario} - Total: ${pedido.Total.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}";
     }
 }
