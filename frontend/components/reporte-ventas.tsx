@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { obtenerReporteVentas } from "@/lib/api";
 import { formatearMoneda, redondearCentavos } from "@/lib/money";
@@ -31,11 +31,20 @@ const FILAS_POR_PAGINA = 200;
 
 export function ReporteVentas() {
   const [desde, setDesde] = useState("2026-01-01");
-  const [hasta, setHasta] = useState("2026-06-02");
+  const [hasta, setHasta] = useState("");
   const [filas, setFilas] = useState<FilaReporte[] | null>(null);
+  const [rangoConsultado, setRangoConsultado] = useState<string | null>(null);
   const [visibles, setVisibles] = useState(FILAS_POR_PAGINA);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // El valor por defecto de "Hasta" es HOY (fecha local del agente); se fija en
+  // un efecto para no hornear la fecha del build en el HTML pre-renderizado.
+  useEffect(() => {
+    const hoy = new Date();
+    const local = new Date(hoy.getTime() - hoy.getTimezoneOffset() * 60000);
+    setHasta(local.toISOString().slice(0, 10));
+  }, []);
 
   const rangoValido = Boolean(desde && hasta) && desde <= hasta;
 
@@ -44,11 +53,15 @@ export function ReporteVentas() {
     setCargando(true);
     setError(null);
     try {
-      // El backend filtra con FechaUtc <= hasta. Si se envía solo la fecha
-      // (00:00), los pedidos de ese día quedan fuera (TICK-306); por eso el
-      // límite superior se manda al final del día.
-      const data = await obtenerReporteVentas(desde, `${hasta}T23:59:59.999`);
+      // El backend filtra FechaUtc (UTC) con <=. Las fechas del formulario son
+      // días LOCALES del agente: se convierten a instantes UTC (inicio del día
+      // 'desde' y fin del día 'hasta') para que "hoy" incluya lo cobrado hoy
+      // aunque en UTC ya sea mañana (TICK-306 + zona horaria).
+      const desdeUtc = new Date(`${desde}T00:00:00`).toISOString();
+      const hastaUtc = new Date(`${hasta}T23:59:59.999`).toISOString();
+      const data = await obtenerReporteVentas(desdeUtc, hastaUtc);
       setFilas(data);
+      setRangoConsultado(`${desde} → ${hasta}`);
       setVisibles(FILAS_POR_PAGINA);
     } catch (e: unknown) {
       // Una API caída no puede parecer "0 resultados" (TICK-305).
@@ -125,6 +138,7 @@ export function ReporteVentas() {
             <div className="flex items-center justify-between rounded-lg border bg-muted/40 p-4">
               <span className="text-sm text-muted-foreground">
                 {filas.length} pedidos en el rango
+                {rangoConsultado ? ` (${rangoConsultado})` : ""}
               </span>
               <span className="text-lg font-semibold">
                 Total: {formatearMoneda(totalGeneral)}

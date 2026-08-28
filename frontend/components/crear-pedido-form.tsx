@@ -5,9 +5,12 @@ import { Plus, Trash2 } from "lucide-react";
 
 import { crearPedido } from "@/lib/api";
 import {
+  calcularDescuentoEstimado,
+  calcularSubtotal,
   calcularTotalEstimado,
   formatearMoneda,
   redondearCentavos,
+  TOPE_DESCUENTO_CUPON,
 } from "@/lib/money";
 import type { Pedido } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -46,8 +49,12 @@ const NOMBRES_ESTADO: Record<number, string> = {
   3: "Cancelado",
 };
 
+// Entero entre 1 y 9999: cubre cualquier pedido real y evita mandar números
+// que desbordan el int de .NET (el backend devolvería un 400 sin detalle útil).
 function esCantidadValida(cantidad: string): boolean {
-  return /^\d+$/.test(cantidad.trim()) && Number(cantidad) >= 1;
+  const texto = cantidad.trim();
+  const n = Number(texto);
+  return /^\d+$/.test(texto) && n >= 1 && n <= 9999;
 }
 
 export function CrearPedidoForm() {
@@ -91,26 +98,40 @@ export function CrearPedidoForm() {
   // Validación de la captura (TICK-309): sin líneas, cantidades vacías, 0 o
   // negativas no se permite confirmar.
   const problemas: string[] = [];
-  if (!/^\d+$/.test(clienteId.trim()) || Number(clienteId) < 1)
+  if (
+    !/^\d+$/.test(clienteId.trim()) ||
+    Number(clienteId) < 1 ||
+    Number(clienteId) > 2147483647
+  )
     problemas.push("El ID de cliente debe ser un número mayor o igual a 1.");
   if (lineas.length === 0) problemas.push("Agrega al menos una línea al pedido.");
   if (lineas.some((l) => !esCantidadValida(l.cantidad)))
-    problemas.push("Cada línea necesita una cantidad entera mayor o igual a 1.");
-  const porcentaje = Number(porcentajeCupon);
-  if (Number.isNaN(porcentaje) || porcentaje < 0 || porcentaje > 100)
-    problemas.push("El % de descuento para estimar debe estar entre 0 y 100.");
+    problemas.push("Cada línea necesita una cantidad entera entre 1 y 9999.");
+  // Se valida el TEXTO del campo: Number("") es 0 y pasaría en silencio.
+  const porcentajeTexto = porcentajeCupon.trim();
+  const porcentajeValido =
+    /^\d+(\.\d+)?$/.test(porcentajeTexto) && Number(porcentajeTexto) <= 100;
+  if (!porcentajeValido)
+    problemas.push("El % de descuento para estimar debe ser un número entre 0 y 100.");
+  const porcentaje = porcentajeValido ? Number(porcentajeTexto) : 0;
 
   const formularioValido = problemas.length === 0;
 
+  const lineasResumen = lineas.map((l) => ({
+    precioUnitario: l.precioUnitario,
+    cantidad: Number(l.cantidad),
+  }));
   const totalEstimado = formularioValido
-    ? calcularTotalEstimado(
-        lineas.map((l) => ({
-          precioUnitario: l.precioUnitario,
-          cantidad: Number(l.cantidad),
-        })),
-        porcentaje
-      )
+    ? calcularTotalEstimado(lineasResumen, porcentaje)
     : null;
+  // Aviso cuando el descuento estimado queda limitado por el tope de $15 del
+  // backend (misma regla de negocio; el estimado la replica).
+  const descuentoTopado =
+    formularioValido &&
+    porcentaje > 0 &&
+    calcularDescuentoEstimado(calcularSubtotal(lineasResumen), porcentaje) ===
+      TOPE_DESCUENTO_CUPON &&
+    (calcularSubtotal(lineasResumen) * porcentaje) / 100 > TOPE_DESCUENTO_CUPON;
 
   async function enviar() {
     // Guardas contra el doble clic (TICK-303): si ya hay un envío en curso no
@@ -304,13 +325,19 @@ export function CrearPedidoForm() {
               cálculo del backend (descuento primero, IVA sobre la base).
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-2">
             <div className="flex items-center justify-between text-lg font-semibold">
               <span>Total estimado</span>
               <span>
                 {totalEstimado === null ? "—" : formatearMoneda(totalEstimado)}
               </span>
             </div>
+            {descuentoTopado && (
+              <p className="text-xs text-muted-foreground">
+                El descuento del cupón se estima topado en{" "}
+                {formatearMoneda(TOPE_DESCUENTO_CUPON)} (tope por pedido).
+              </p>
+            )}
           </CardContent>
         </Card>
 

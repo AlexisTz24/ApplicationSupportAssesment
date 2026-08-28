@@ -28,6 +28,7 @@ export default function RootLayout({
             <a
               href="https://mercadoverde.example.com/centro-de-ayuda"
               target="_blank"
+              rel="noopener noreferrer"
               className="underline underline-offset-4 hover:text-foreground"
             >
               Centro de ayuda

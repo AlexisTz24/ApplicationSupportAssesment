@@ -22,6 +22,10 @@ const UMBRAL_STOCK_BAJO = 3;
 
 export function BuscadorProductos() {
   const [termino, setTermino] = useState("");
+  // Término que produjo los resultados en pantalla: durante el debounce o el
+  // vuelo de la petición puede diferir de lo tecleado, y la etiqueta de
+  // resultados debe reflejar lo que realmente se buscó.
+  const [terminoMostrado, setTerminoMostrado] = useState("");
   const [resultados, setResultados] = useState<Producto[]>([]);
   const [buscado, setBuscado] = useState(false);
   const [cargando, setCargando] = useState(false);
@@ -47,6 +51,7 @@ export function BuscadorProductos() {
       buscarProductos(termino, { signal: controlador.signal })
         .then((productos) => {
           setResultados(productos);
+          setTerminoMostrado(termino);
           setBuscado(true);
           setError(null);
           setCargando(false);
@@ -105,8 +110,8 @@ export function BuscadorProductos() {
             {/* El término y los nombres de producto se renderizan SIEMPRE como
                 texto (React los escapa); nunca como HTML. */}
             <p className="text-sm text-muted-foreground">
-              Resultados para <strong>{termino}</strong> — {resultados.length}{" "}
-              producto(s).
+              Resultados para <strong>{terminoMostrado}</strong> —{" "}
+              {resultados.length} producto(s).
             </p>
 
             <div className="grid gap-3 sm:grid-cols-2">
