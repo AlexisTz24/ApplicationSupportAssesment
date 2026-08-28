@@ -47,6 +47,12 @@ public class PedidoService
             if (producto == null)
                 throw new InvalidOperationException($"Producto {l.ProductoId} no existe.");
 
+            // Verificación temprana de stock: si no alcanza, se rechaza el pedido
+            // ANTES de cobrar (evita cobros por mercancía inexistente).
+            if (producto.Stock < l.Cantidad)
+                throw new InvalidOperationException(
+                    $"Stock insuficiente para el producto {producto.Nombre}.");
+
             var linea = new LineaPedido
             {
                 ProductoId = producto.Id,
@@ -127,8 +133,31 @@ public class PedidoService
         //    rechazado o pendiente no debe consumir stock.
         if (pedido.Estado == EstadoPedido.Pagado)
         {
-            foreach (var linea in pedido.Lineas)
-                _inventario.DescontarStock(linea.ProductoId, linea.Cantidad);
+            var lineasDescontadas = new List<LineaPedido>();
+            try
+            {
+                foreach (var linea in pedido.Lineas)
+                {
+                    _inventario.DescontarStock(linea.ProductoId, linea.Cantidad);
+                    lineasDescontadas.Add(linea);
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Carrera residual: otro pedido consumió el stock entre la
+                // verificación inicial y el descuento, con el cobro ya hecho.
+                // Se repone lo descontado, el pedido queda Pendiente (no Pagado)
+                // y la situación queda registrada para reversar el cobro.
+                foreach (var linea in lineasDescontadas)
+                    _inventario.ReponerStock(linea.ProductoId, linea.Cantidad);
+
+                pedido.Estado = EstadoPedido.Pendiente;
+                pedido.MotivoRechazo =
+                    $"Stock agotado tras el cobro (ref {pedido.ReferenciaPago}); requiere reverso del pago.";
+                _logger.LogCritical(ex,
+                    "Pedido del cliente {ClienteId} cobrado (ref {Referencia}) sin stock disponible; requiere reverso del pago.",
+                    cliente.Id, pedido.ReferenciaPago);
+            }
         }
 
         // 6) Generar el comprobante de confirmación que se envía por correo al cliente.
