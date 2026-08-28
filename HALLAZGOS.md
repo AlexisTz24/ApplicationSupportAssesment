@@ -108,22 +108,164 @@ Contexto: lunes 9:00 a.m., seis tickets de backend (Anexo A) y nueve del panel (
 
 ## Parte 3 — Correcciones (backend)
 
-*(Se completa por ticket con su commit; ver abajo.)*
+> Antes de tocar código reproduje cada síntoma contra el sistema levantado con el código original (curl/Swagger); los comandos están en cada sección. Después de cada corrección quité el `Skip` del test correspondiente en `FixesEsperadosTests` — los 4 tests del evaluador + 2 míos pasan (8/8 con las pruebas de humo).
+
+### TICK-206 — Inyección SQL en el buscador · commit `8225453`
+
+- **Síntoma (reproducido):** `GET /api/productos/buscar?termino='` → **500**; `termino=zzz%' OR 1=1 --` → devolvió **los 4 productos** del catálogo.
+- **Causa raíz:** `ProductoRepository.cs:23` — SQL concatenado con el texto del usuario dentro de `FromSqlRaw`.
+- **Corrección:** consulta LINQ parametrizada con `EF.Functions.Like`, escapando además los comodines `%`/`_` para que se busquen literalmente. El término ya nunca forma parte del SQL.
+- **Regresiones:** ninguna esperada; la semántica (búsqueda case-insensitive por sub-cadena, solo activos) se conserva. Verificado con el test TICK206 (comilla no rompe; payload de inyección devuelve vacío) y manualmente.
+
+### TICK-203 — Errores 500 al confirmar pedidos · commit `dcedc77`
+
+- **Síntoma (reproducido):** `POST /api/pedidos` con `clienteId=2` → 500; con `codigoCupon=PROMO50` → 500.
+- **Causa raíz:** dos `NullReferenceException` distintas: (a) `cupon.FechaExpiracionUtc` con cupón inexistente (`PedidoService`, PROMO50 nunca se registró en BD); (b) `cliente.Email.ToUpper()` con email null (`GenerarLineaComprobante`, caso Bruno Díaz).
+- **Corrección:** (a) cupón inexistente o no vigente → error de negocio claro ("El cupón 'X' no existe / no está vigente"); (b) el comprobante tolera email null. Además `PedidosController` ahora convierte los errores de negocio (`InvalidOperationException`) en **400 ProblemDetails** con detalle y los registra en log — antes cualquier error de negocio era un 500 crudo e invisible.
+- **Regresiones / efectos declarados:** un cupón **vencido** ahora rechaza el pedido con mensaje claro, en vez de cobrarlo silenciosamente sin descuento (eso era exactamente la queja de Marketing: "no aplica nada de descuento y no marca error"). Decisión declarada; si negocio prefiere ignorar el cupón y seguir, es un cambio de una línea.
+
+### TICK-202 — El cobro con cupón no cuadra · commit `d3e4605`
+
+- **Síntoma (reproducido):** pedido de $25.00 con `BIENVENIDA10` (10%) → la API devolvió `Impuesto=3.25` (13% de 25) y `Total=25.75`; Finanzas espera impuesto sobre la base con descuento: `(25 − 2.50) × 13% = 2.93`, total `25.43`.
+- **Causa raíz:** (a) `impuesto = subtotal × 0.13` sin restar el descuento; (b) vigencia comparada contra `DateTime.Now` (hora local UTC-6) cuando la expiración se persiste en **UTC** → la validez cambiaba según la hora del día.
+- **Corrección:** impuesto sobre `subtotal − descuento`; comparación contra `DateTime.UtcNow`; y redondeo **al centavo** (`Math.Round(..., 2, AwayFromZero)`) de descuento e impuesto para que el dinero cuadre exacto.
+- **Regresiones:** los totales con cupón bajan (eso es lo correcto); pedidos sin cupón no cambian. Test TICK202 en verde.
+
+### TICK-205 — Pedido "Pagado" sin dinero · commit `2125bae`
+
+- **Síntoma:** pedido en estado Pagado sin referencia de pasarela (log 13:05, pedido 1190; POST tardó 5.5 s → timeout del proveedor).
+- **Causa raíz:** el `catch` de la pasarela hacía `Estado = Pagado` cuando el proveedor caía; y la `Referencia` del cobro aprobado nunca se persistía.
+- **Corrección:** excepción de pasarela → **Pendiente** (el cobro pudo o no aplicarse del lado del proveedor: lo honesto es conciliar, no asumir) + `LogError`; rechazo → **Rechazado** con motivo persistido; cobro aprobado → se persiste `ReferenciaPago`. El stock ya solo se descuenta en pedidos aprobados.
+- **Regresiones / efectos declarados:** `Pedido` tiene columnas nuevas (`ReferenciaPago`, `MotivoRechazo`); como el esquema se crea con `EnsureCreated`, hay que recrear la base (`docker compose down -v && docker compose up --build`). Conciliación ahora puede consultar pedidos `Pendiente` con motivo "pasarela no respondió".
+
+### TICK-201 — Stock en −1 con pedidos simultáneos · commit `b706dc4`
+
+- **Síntoma:** dos pedidos del Monitor 24" con 11 ms de diferencia dejaron stock −1 (log 11:48). Al reproducir con dos POST concurrentes comprobé además que el perdedor recibía un 500 crudo **después de haber sido cobrado**.
+- **Causa raíz:** `InventarioService.DescontarStock` hacía leer→validar→escribir sin control de concurrencia; `Producto.RowVersion` estaba declarado pero sin usar.
+- **Corrección (3 capas):**
+  1. `Producto.Stock` como **token de concurrencia optimista** (elegí el propio Stock y no RowVersion porque funciona igual en PostgreSQL, SQLite e InMemory, los tres proveedores del proyecto; RowVersion automático es específico de SQL Server).
+  2. `DescontarStock` reintenta ante `DbUpdateConcurrencyException` (máx. 3) recargando el valor real y **revalidando** — el stock ya no puede quedar negativo.
+  3. `PedidoService` verifica stock **antes de cobrar** y, si la carrera residual gana tras el cobro, repone lo descontado, deja el pedido **Pendiente** con motivo y emite `LogCritical` ("requiere reverso del pago") — la falla nunca queda invisible.
+- **Regresiones:** bajo contención extrema el pedido puede fallar por "stock insuficiente" tras reintentos — comportamiento correcto (antes sobre-vendía). La actualización del stock sigue siendo la única escritura concurrente sobre `Producto`.
+
+### TICK-204 — El reporte de ventas se cuelga · commit `46d8db1`
+
+- **Síntoma (reproducido):** sembré 20,000 pedidos con líneas → `GET /api/reportes/ventas` tardó **7.0 s** en local (en producción, con más filas y latencia real: los ~55 s del log y timeouts de 30 s).
+- **Causa raíz:** patrón **N+1** — por cada pedido del rango se consultaban sus líneas y su cliente (2N+1 consultas).
+- **Corrección:** una **única consulta proyectada** (`Select` con navegaciones `Cliente`/`Lineas`): la agregación ocurre en la base de datos. Tras el fix, el mismo reporte tarda milisegundos (medido abajo en la verificación).
+- **Regresiones:** el resultado es idéntico fila a fila; pedidos sin líneas suman 0 artículos (protegido con `Sum(int?) ?? 0`).
+
+### Hallazgos extra (sin ticket) — commit `8e9bbf3` y repartidos
+
+- **Validación de entradas del pedido:** la API aceptaba pedidos sin líneas o con cantidad 0/negativa; una cantidad negativa incluso **aumentaba** el stock al "descontarla". Ahora se rechazan con 400.
+- **Se cobraba antes de validar stock** (cliente cobrado y 500 sin pedido persistido) — corregido con la verificación temprana (TICK-201).
+- **Stock descontado en pedidos rechazados** — corregido (TICK-205).
+- **Errores de negocio como 500 crudos** — corregido con el mapeo a ProblemDetails (TICK-203).
+- **Observabilidad:** fallos de pasarela, rechazos, topes de descuento y carreras de stock ahora dejan log estructurado (`ILogger` en `PedidoService`, opcional para no romper la construcción de los tests existentes).
+- **Documentados sin corregir (fuera del alcance mínimo):** la pasarela se registra como `Singleton` compartiendo un `Random` (aceptable aquí, pero un cliente HTTP real debería ser `Scoped`/`HttpClientFactory`); no hay transacción que agrupe pedido+stock en un único commit (mitigado con compensación y logs; lo ideal sería `IDbContextTransaction` expuesto por el puerto); el endpoint de búsqueda no limita la longitud del término (abuso/DoS ligero); el reporte devuelve **todas** las filas del rango sin paginación de API (el panel pagina el render, pero la API debería soportar `take/skip`).
 
 ---
 
-## Parte 4 — Tope de descuento
+## Parte 4 — Tope de descuento · commit `28da32a`
 
-*(Pendiente de completar con la implementación.)*
+- **Dónde va la regla:** en `PedidoService`, junto al cálculo del descuento (constante `TopeDescuentoCupon = 15.00m`). Es una regla de negocio de pedidos: ni en el controller (capa HTTP) ni en el cupón (el tope es *por pedido*, no por cupón).
+- **Comportamiento:** si `subtotal × %` supera $15.00, se aplican $15.00 exactos y el impuesto se calcula sobre la base con el descuento ya topado.
+- **Constancia (doble, pensada para soporte):**
+  1. **Persistida:** `Pedido.NotaDescuento` = "Cupón X: descuento calculado 50.00 superó el tope; se aplicó 15.00" — viaja en la respuesta de la API y el panel la muestra; cualquier reclamo se resuelve viendo el pedido, sin ir a los logs.
+  2. **Log estructurado** con cupón, monto calculado, tope y cliente.
+- **Cómo lo probé:** dos pruebas nuevas en `tests/.../TopeDescuentoTests.cs`: cupón 50% sobre $100 → descuento 15.00, impuesto 11.05, total 96.05, nota presente; y cupón 10% → 10.00 sin nota (no altera descuentos legítimos).
 
 ---
 
 ## Parte 5 — Comunicación
 
-*(Pendiente de completar al cierre.)*
+Elegí **TICK-205** (pedido "Pagado" sin dinero) por su riesgo financiero.
+
+### RCA breve (equipo técnico)
+
+> **Incidente:** pedidos marcados `Pagado` sin cobro real, detectados por Conciliación (ej. pedido 1190, 02/06 13:05).
+> **Causa raíz:** en `PedidoService.CrearPedido`, el `catch` de la excepción de la pasarela (timeout/503 del proveedor) asignaba `Estado = Pagado`. Es decir: la *indisponibilidad* del proveedor se trataba como cobro exitoso. Además la referencia de cobro nunca se persistía, por lo que ni siquiera los cobros buenos eran conciliables.
+> **Impacto:** todo pedido creado durante una caída del proveedor (~20% del tiempo en la simulación) quedaba como ingreso inexistente; mercancía potencialmente despachada sin pago.
+> **Corrección:** desplegada en `2125bae`. Excepción de pasarela → `Pendiente` + log de error; rechazo → `Rechazado` con motivo; aprobado → `Pagado` con `ReferenciaPago` persistida. El stock solo se descuenta en pedidos aprobados.
+> **Acción preventiva:** (1) test de regresión `TICK205` activo en la suite — cualquier cambio que vuelva a marcar Pagado en fallo rompe el build; (2) propuesta: alerta/consulta de conciliación diaria `Estado=Pagado AND ReferenciaPago IS NULL` (hoy debe dar 0 filas) y revisión de los pedidos `Pendiente` con motivo de pasarela.
+
+### Mensaje al área de negocio (3–5 líneas)
+
+> Detectamos que, cuando el proveedor de cobros tenía caídas, el sistema registraba algunos pedidos como "pagados" aunque el cobro no se hubiera hecho. Ya lo corregimos: ahora esos casos quedan marcados como "pendientes", con su motivo, para que Conciliación los revise y nadie despache mercancía sin pago. Los pedidos afectados anteriores se pueden identificar porque están "pagados" pero sin referencia de cobro; les compartimos la lista para regularizarlos. Desde hoy, cada pago aprobado guarda su número de referencia, así que la conciliación contra el proveedor queda directa.
 
 ---
 
 ## Frontend (Parte 6)
 
-*(Pendiente de completar con las correcciones del panel.)*
+Método idéntico al backend: reproducir en el navegador → aislar causa → cambio mínimo → verificar (el panel compila con `next build`, que incluye type-check y ESLint). Varios tickets del Anexo B eran **síntomas en el panel de bugs del backend** — los distingo explícitamente:
+
+- **TICK-302 (parcial)** — "el total estimado no coincide con lo que cobra la API": mitad backend (impuesto sobre base sin descuento, TICK-202) y mitad frontend (orden de cálculo distinto + punto flotante).
+- **TICK-306** — el rango lo arma el panel (frontend), aunque el filtro `<=` viva en el backend.
+- **TICK-304** — el volumen viene del backend sin paginar, pero el congelamiento es del render del panel.
+
+### TICK-301 — XSS en el buscador · commit `a2a7a01`
+
+- **Síntoma:** buscar `<img src=x onerror=alert(1)>` (o un producto con ese nombre) ejecutaba el HTML en el panel.
+- **Causa raíz:** `buscador-productos.tsx` renderizaba el término **y** `p.Nombre` con `dangerouslySetInnerHTML`.
+- **Corrección:** render como texto plano (React escapa por defecto). Es la contraparte cliente del TICK-206: entrada no confiable jamás se interpreta.
+- **Regresión posible:** ninguna — no existía contenido HTML legítimo que mostrar.
+
+### TICK-307 — Búsquedas que se pisan · commit `a2a7a01`
+
+- **Causa raíz:** un `fetch` por **cada tecla**, sin cancelación ni orden: la respuesta más lenta pisaba a la más nueva, y se inundaba la API.
+- **Corrección:** debounce de 300 ms + `AbortController` (la petición anterior se cancela al teclear; una respuesta obsoleta se ignora). Botón/Enter reutilizan el mismo flujo.
+
+### TICK-308 — Badge de stock engañoso · commit `a2a7a01`
+
+- **Causa raíz:** `variant={p.Stock > 0 ? "success" : "warning"}` — verde aun con 1 unidad.
+- **Corrección:** tres estados: `Agotado` (rojo), `Stock bajo: N` (ámbar, ≤3 unidades), `N en stock` (verde).
+
+### TICK-303 — Pedidos duplicados por doble clic · commit `9d2e3a5`
+
+- **Causa raíz:** `enviar()` no tenía guarda de reentrada y el botón no se deshabilitaba: cada clic era un `POST /api/pedidos` (y cada uno cobraba y descontaba stock).
+- **Corrección:** guarda `if (enviando) return` + botón deshabilitado con "Enviando…". 
+- **Nota de fondo (documentada):** la protección de UI reduce el caso real, pero la garantía fuerte sería **idempotencia en la API** (clave de idempotencia por intento de pedido); lo dejo propuesto porque excede el cambio mínimo.
+
+### TICK-309 — Cantidades inválidas · commit `9d2e3a5`
+
+- **Causa raíz:** `parseInt` sin validar (vacío → `NaN`), sin `min`, y el submit no comprobaba nada; el backend tampoco (hasta el hardening `8e9bbf3`).
+- **Corrección:** la cantidad se captura como texto y se valida (entero ≥ 1); cliente y % de estimación también; los problemas se listan visibles y el botón queda bloqueado. Defensa en profundidad: el backend valida lo mismo (nunca confiar solo en el cliente).
+
+### TICK-302 — Montos del panel · commits `217fb4f` y `9d2e3a5`
+
+- **Síntoma:** subtotales tipo `149.70000000000002` sin formato; total estimado ≠ total cobrado.
+- **Causa raíz:** (a) aritmética de punto flotante mostrada cruda; (b) `money.ts` calculaba `subtotal + impuesto − descuento` con el impuesto sobre el subtotal **sin** descuento — ni siquiera coincidía con el backend *bugueado*, y menos con el corregido.
+- **Corrección:** `money.ts` replica exactamente el cálculo del backend corregido (descuento redondeado → IVA 13% sobre base imponible → todo al centavo) y `formatearMoneda` usa `Intl.NumberFormat`. El subtotal por línea se muestra redondeado y formateado.
+
+### TICK-305 — Errores invisibles · commits `3bac5ba` + pantallas
+
+- **Causa raíz:** `api.ts` capturaba fallos y devolvía `[]` (buscador/reporte) o parseaba la respuesta sin revisar `res.ok` (crear pedido): una API caída parecía "0 resultados" y un 500 parecía pedido exitoso.
+- **Corrección:** el cliente HTTP valida `res.ok`, extrae el detalle del `ProblemDetails` del backend y lanza `Error`; cada pantalla muestra el mensaje en un alert (`role="alert"`) y distingue "sin resultados" de "falló la llamada".
+
+### TICK-306 — Falta el último día del reporte · commit `c1354ec`
+
+- **Causa raíz:** el panel enviaba `hasta=YYYY-MM-DD` (equivale a las 00:00) y el backend filtra `FechaUtc <= hasta`: los pedidos del propio día quedaban fuera.
+- **Corrección:** el límite superior viaja como fin de día (`T23:59:59.999`) y se valida `desde <= hasta`. (Alternativa considerada: filtro exclusivo `< hasta+1día` en el backend; descartada por tocar el contrato de la API.)
+
+### TICK-304 — El reporte congela el navegador · commit `c1354ec`
+
+- **Causa raíz:** se renderizaban **todas** las filas del rango en una sola pasada (cientos de miles de `<tr>`).
+- **Corrección:** render paginado (200 filas + "Mostrar más", con contador "mostrando X de Y"); los totales se calculan sobre el rango completo. 
+- **Nota:** la solución completa sería paginar en la API (`take/skip`) o virtualizar la tabla; documentado como mejora.
+
+### Extras de frontend (sin ticket)
+
+- **Claves de React**: listas con `key={index}` (líneas del pedido, filas del reporte) → claves estables (`id` incremental / `PedidoId`).
+- **Accesibilidad:** `aria-label` en botones de icono (buscar, eliminar línea), `label` reales en los selects/cantidades (antes `span`), `role="alert"` en los mensajes de error, `aria-invalid` en cantidades erróneas.
+- **Estado del pedido:** la API serializa el enum como número; el panel mostraba `1` o un badge verde solo para `Pagado`; ahora se traduce (`Pendiente/Pagado/Rechazado/Cancelado`) con color por severidad y muestra referencia de pago, motivo de rechazo y nota de descuento.
+- **`encodeURIComponent`** en todos los parámetros de query (un término con `&`, `%` o espacios ya no rompe la URL).
+
+---
+
+## Verificación final
+
+*(Se completa al cierre con la corrida completa: tests + docker compose up --build + prueba E2E.)*
+
+## Tiempo invertido
+
+*(Se reporta al cierre.)*
