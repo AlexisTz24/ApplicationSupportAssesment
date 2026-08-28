@@ -264,8 +264,20 @@ Método idéntico al backend: reproducir en el navegador → aislar causa → ca
 
 ## Verificación final
 
-*(Se completa al cierre con la corrida completa: tests + docker compose up --build + prueba E2E.)*
+1. **Tests:** `dotnet test MercadoVerde.sln` (SDK 8 en contenedor) → **8/8 en verde, 0 skipped**: los 4 tests del evaluador (`TICK202/203/205/206`, ya sin `Skip`), los 2 nuevos del tope de descuento y las 2 pruebas de humo.
+2. **Build del panel:** `next build` (type-check + ESLint) sin errores.
+3. **Sistema completo:** `docker compose down -v && docker compose up --build` (la base se recrea por las columnas nuevas de `Pedido`) y batería E2E contra los contenedores:
+   - Búsqueda normal OK; `termino='` → 200 vacío (antes 500); payload `' OR 1=1 --` → **0 productos** (antes devolvía todo el catálogo).
+   - `POST` cliente 2 (sin email) → 200 (antes 500). En esa corrida además la pasarela simulada cayó y el pedido quedó **Pendiente** sin referencia (antes: "Pagado" fantasma).
+   - `POST` con `PROMO50` → **400** con detalle "El cupón 'PROMO50' no existe." (antes 500).
+   - Cantidad 0 → **400** con detalle (antes se aceptaba).
+   - `BIENVENIDA10` sobre $25.00 → Descuento 2.50, **Impuesto 2.93, Total 25.43** (antes 3.25/25.75) y `ReferenciaPago` persistida.
+   - Tope: `BIENVENIDA10` sobre Monitor $180 → descuento calculado 18.00 → **aplicado 15.00**, con `NotaDescuento` visible en la respuesta.
+   - Concurrencia: dos compras simultáneas de la última unidad → una gana (Pagado), la otra recibe 400 "Stock insuficiente" **sin ser cobrada**; stock final 0, nunca negativo.
+   - Reporte con 20,000 pedidos sembrados: **6.97 s → 0.087 s** (~80×), incluyendo el día final del rango.
+   - Panel: `/`, `/pedidos` y `/reportes` responden 200; `dangerouslySetInnerHTML` eliminado del código.
 
-## Tiempo invertido
+## Herramientas y tiempo
 
-*(Se reporta al cierre.)*
+- Trabajé con mi IDE, Docker, `curl`/Swagger y **asistencia de IA (Claude Code)** para acelerar la exploración del código, la redacción de esta bitácora y la generación de casos de prueba; cada corrección fue reproducida antes de tocar código y verificada después con tests y la batería E2E de arriba (lo documenta la regla de la prueba sobre herramientas consultadas).
+- Tiempo total efectivo de la sesión de resolución: **~2 horas** (backend + frontend + documentación), una vez instaladas las herramientas (la descarga inicial de imágenes de Docker corrió en paralelo).
