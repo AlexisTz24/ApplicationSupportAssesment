@@ -33,7 +33,7 @@ public class FixesEsperadosTests
     // ====================================================================
     // TICK-202 — El impuesto debe calcularse sobre (subtotal - descuento)
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-202: el impuesto debe gravarse sobre (subtotal - descuento), no sobre el subtotal.")]
+    [Fact]
     public void TICK202_Impuesto_SeCalculaSobreSubtotalConDescuento()
     {
         using var db = NuevaBdEnMemoria();

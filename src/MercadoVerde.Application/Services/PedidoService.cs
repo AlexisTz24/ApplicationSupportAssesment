@@ -63,10 +63,12 @@ public class PedidoService
             if (cupon == null)
                 throw new InvalidOperationException($"El cupón '{dto.CodigoCupon}' no existe.");
 
-            // Validar vigencia del cupón
-            if (cupon.FechaExpiracionUtc >= DateTime.Now && cupon.Activo)
+            // Validar vigencia del cupón. La expiración se persiste en UTC, así
+            // que se compara contra la hora UTC (no la hora local del servidor).
+            if (cupon.FechaExpiracionUtc >= DateTime.UtcNow && cupon.Activo)
             {
-                descuento = subtotal * (cupon.PorcentajeDescuento / 100m);
+                descuento = Math.Round(subtotal * (cupon.PorcentajeDescuento / 100m),
+                    2, MidpointRounding.AwayFromZero);
             }
             else
             {
@@ -74,9 +76,12 @@ public class PedidoService
             }
         }
 
-        // 3) Calcular impuesto y total
-        decimal impuesto = subtotal * TasaImpuesto;
-        decimal total = subtotal - descuento + impuesto;
+        // 3) Calcular impuesto y total. El impuesto grava la base imponible
+        //    (subtotal - descuento) y todos los montos se redondean al centavo.
+        decimal baseImponible = subtotal - descuento;
+        decimal impuesto = Math.Round(baseImponible * TasaImpuesto,
+            2, MidpointRounding.AwayFromZero);
+        decimal total = baseImponible + impuesto;
 
         pedido.Subtotal = subtotal;
         pedido.Descuento = descuento;
