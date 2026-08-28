@@ -99,6 +99,7 @@ Tras `docker compose up --build`, confirma cómo se ve el sistema **sano**. Así
 - **El panel no trae datos o muestra errores de red:** confirma que el servicio `api` está arriba (`docker compose ps`) y revisa sus logs (`docker compose logs api`).
 - **La API no conecta a la base:** Compose espera a que `db` esté *healthy* antes de arrancar `api`; si falla, mira `docker compose logs db`.
 - **Quiero reiniciar los datos:** `docker compose down -v` borra el volumen `pgdata`; al volver a `up` la base se siembra de nuevo.
+- **Vengo de la rama `main` con un volumen viejo:** la rama de solución agrega columnas a `Pedido` (`ReferenciaPago`, `MotivoRechazo`, `NotaDescuento`) y el esquema se crea con `EnsureCreated`, así que es **obligatorio** `docker compose down -v` antes de `docker compose up --build`; de lo contrario verás errores `column ... does not exist`.
 
 ## 📁 Mapa de archivos clave
 

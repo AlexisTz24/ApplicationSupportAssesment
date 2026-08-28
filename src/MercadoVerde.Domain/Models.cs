@@ -42,6 +42,16 @@ public class Pedido
     public decimal Total { get; set; }
 
     public EstadoPedido Estado { get; set; } = EstadoPedido.Pendiente;
+
+    // Trazabilidad del cobro: referencia devuelta por la pasarela cuando el
+    // pago fue aprobado, y motivo cuando no lo fue (para conciliación/soporte).
+    public string? ReferenciaPago { get; set; }
+    public string? MotivoRechazo { get; set; }
+
+    // Constancia visible para soporte cuando el descuento del cupón fue
+    // limitado por el tope por pedido.
+    public string? NotaDescuento { get; set; }
+
     public List<LineaPedido> Lineas { get; set; } = new();
 }
 

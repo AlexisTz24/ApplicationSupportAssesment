@@ -16,3 +16,6 @@ frontend/.next/
 frontend/out/
 # Clave de evaluación interna — NO se entrega al candidato
 SOLUCION-INTERNA.md
+
+# Enunciado de la prueba (no se versiona)
+*.pdf

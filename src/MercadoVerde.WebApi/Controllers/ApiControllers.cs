@@ -26,14 +26,35 @@ public class ProductosController : ControllerBase
 public class PedidosController : ControllerBase
 {
     private readonly PedidoService _pedidos;
-    public PedidosController(PedidoService pedidos) => _pedidos = pedidos;
+    private readonly ILogger<PedidosController> _logger;
+
+    public PedidosController(PedidoService pedidos, ILogger<PedidosController> logger)
+    {
+        _pedidos = pedidos;
+        _logger = logger;
+    }
 
     // POST /api/pedidos
     [HttpPost]
     public IActionResult Crear([FromBody] CrearPedidoDto dto)
     {
-        var pedido = _pedidos.CrearPedido(dto);
-        return Ok(pedido);
+        try
+        {
+            var pedido = _pedidos.CrearPedido(dto);
+            return Ok(pedido);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Error de negocio esperado (cliente/producto/cupón inválido, stock
+            // insuficiente): se responde 400 con el detalle en vez de un 500 crudo.
+            _logger.LogWarning("Pedido rechazado por regla de negocio: {Motivo}", ex.Message);
+            return BadRequest(new ProblemDetails
+            {
+                Title = "No se pudo crear el pedido.",
+                Detail = ex.Message,
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
     }
 }
 
@@ -48,6 +69,21 @@ public class ReportesController : ControllerBase
     [HttpGet("ventas")]
     public IActionResult Ventas([FromQuery] DateTime desde, [FromQuery] DateTime hasta)
     {
+        if (desde > hasta)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Rango de fechas inválido.",
+                Detail = "'desde' no puede ser posterior a 'hasta'.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        // Si 'hasta' llega como fecha sin hora (00:00), se interpreta como el
+        // día completo: pedir "hasta hoy" incluye los pedidos de hoy.
+        if (hasta.TimeOfDay == TimeSpan.Zero)
+            hasta = hasta.AddDays(1).AddTicks(-1);
+
         return Ok(_reportes.GenerarReporteVentas(desde, hasta));
     }
 }

@@ -33,7 +33,7 @@ public class FixesEsperadosTests
     // ====================================================================
     // TICK-202 — El impuesto debe calcularse sobre (subtotal - descuento)
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-202: el impuesto debe gravarse sobre (subtotal - descuento), no sobre el subtotal.")]
+    [Fact]
     public void TICK202_Impuesto_SeCalculaSobreSubtotalConDescuento()
     {
         using var db = NuevaBdEnMemoria();
@@ -60,7 +60,7 @@ public class FixesEsperadosTests
     // ====================================================================
     // TICK-203 — Un cupón inexistente no debe reventar con NullReference (500)
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-203: un código de cupón inexistente no debe lanzar NullReferenceException.")]
+    [Fact]
     public void TICK203_CuponInexistente_NoLanzaNullReference()
     {
         using var db = NuevaBdEnMemoria();
@@ -83,7 +83,7 @@ public class FixesEsperadosTests
     // ====================================================================
     // TICK-205 — Si el cobro falla, el pedido NO puede quedar "Pagado"
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-205: si la pasarela falla/cae, el pedido no debe marcarse como Pagado.")]
+    [Fact]
     public void TICK205_CobroQueFalla_NoDejaPedidoPagado()
     {
         using var db = NuevaBdEnMemoria();
@@ -105,7 +105,7 @@ public class FixesEsperadosTests
     // TICK-206 — El buscador no debe ser vulnerable a inyección SQL
     // (usa SQLite real en memoria porque el repo usa FromSqlRaw)
     // ====================================================================
-    [Fact(Skip = "Esperando fix de TICK-206: la búsqueda debe parametrizarse (sin inyección SQL).")]
+    [Fact]
     public void TICK206_Buscador_NoPermiteInyeccionNiRompeConComilla()
     {
         using var conn = new SqliteConnection("DataSource=:memory:");
