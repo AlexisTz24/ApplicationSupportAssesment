@@ -39,6 +39,10 @@ export interface Pedido {
   Impuesto: number;
   Total: number;
   Estado: EstadoPedido | number;
+  // Trazabilidad del cobro y constancias (ver Pedido en el backend).
+  ReferenciaPago?: string | null;
+  MotivoRechazo?: string | null;
+  NotaDescuento?: string | null;
   Lineas: LineaPedido[];
 }
 
